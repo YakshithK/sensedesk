@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { open } from '@tauri-apps/plugin-dialog'
 import './App.css'
 
 function App() {
@@ -9,6 +8,7 @@ function App() {
   const [selectedFolders, setSelectedFolders] = useState<string[]>([])
   const [indexing, setIndexing] = useState(false)
   const [apiKey, setApiKey] = useState('')
+  const [newFolder, setNewFolder] = useState('')
 
   const handleSearch = async () => {
     console.log('Search clicked')
@@ -20,17 +20,15 @@ function App() {
     }
   }
 
-  const handleSelectFolders = async () => {
-    console.log('Select folders clicked')
-    try {
-      const folders = await open({ directory: true, multiple: true })
-      console.log('Folders selected:', folders)
-      if (folders) {
-        setSelectedFolders(Array.isArray(folders) ? folders : [folders])
-      }
-    } catch (error) {
-      console.error('Folder selection failed:', error)
+  const handleAddFolder = () => {
+    if (newFolder.trim()) {
+      setSelectedFolders([...selectedFolders, newFolder.trim()])
+      setNewFolder('')
     }
+  }
+
+  const handleRemoveFolder = (index: number) => {
+    setSelectedFolders(selectedFolders.filter((_, i) => i !== index))
   }
 
   const handleStartIndexing = async () => {
@@ -90,9 +88,28 @@ function App() {
       {/* Indexing */}
       <div className="mb-4">
         <h2 className="text-lg font-semibold mb-2">Indexing</h2>
-        <button onClick={handleSelectFolders} className="px-4 py-2 bg-purple-500 text-white rounded mr-2">
-          Select Folders
-        </button>
+        <div className="mb-2">
+          <input
+            type="text"
+            value={newFolder}
+            onChange={(e) => setNewFolder(e.target.value)}
+            placeholder="Enter folder path (e.g., /mnt/c/Users/YourName/Desktop)"
+            className="p-2 border rounded mr-2 flex-1"
+          />
+          <button onClick={handleAddFolder} className="px-4 py-2 bg-purple-500 text-white rounded">
+            Add Folder
+          </button>
+        </div>
+        <ul className="mb-2">
+          {selectedFolders.map((folder, index) => (
+            <li key={index} className="flex items-center justify-between p-1 border rounded mb-1">
+              <span>{folder}</span>
+              <button onClick={() => handleRemoveFolder(index)} className="px-2 py-1 bg-red-500 text-white rounded">
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
         <button 
           onClick={handleStartIndexing} 
           disabled={selectedFolders.length === 0 || indexing}

@@ -3,6 +3,7 @@ use uuid::Uuid;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FileRecord {
     pub id: String,
     pub path: String,
@@ -14,6 +15,7 @@ pub struct FileRecord {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ChunkRecord {
     pub id: String,
     pub file_id: String,
@@ -79,6 +81,7 @@ pub async fn insert_chunk(
     Ok(id)
 }
 
+#[allow(dead_code)]
 pub async fn get_indexer_state(pool: &SqlitePool, key: &str) -> Result<Option<String>, sqlx::Error> {
     let row = sqlx::query("SELECT value FROM indexer_state WHERE key = ?")
         .bind(key)
@@ -87,6 +90,7 @@ pub async fn get_indexer_state(pool: &SqlitePool, key: &str) -> Result<Option<St
     Ok(row.map(|r| r.get("value")))
 }
 
+#[allow(dead_code)]
 pub async fn set_indexer_state(pool: &SqlitePool, key: &str, value: &str) -> Result<(), sqlx::Error> {
     sqlx::query("INSERT OR REPLACE INTO indexer_state (key, value) VALUES (?, ?)")
         .bind(key)
