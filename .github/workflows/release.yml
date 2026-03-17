@@ -55,11 +55,11 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SENSEDESK_API_KEY: ${{ secrets.SENSEDESK_API_KEY }}
+          VISH_API_KEY: ${{ secrets.SENSEDESK_API_KEY }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'SenseDesk ${{ github.ref_name }}'
-          releaseBody: 'See the assets below to download and install SenseDesk for your platform.'
+          releaseName: 'Vish ${{ github.ref_name }}'
+          releaseBody: 'See the assets below to download and install Vish for your platform.'
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
