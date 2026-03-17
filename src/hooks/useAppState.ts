@@ -5,24 +5,16 @@ export type AppScreen = "loading" | "setup" | "indexing" | "search";
 
 export function useAppState() {
   const [screen, setScreen] = useState<AppScreen>("loading");
-  const [apiKeySet, setApiKeySet] = useState(false);
 
   const checkState = async () => {
     try {
-      // Check if API key is set
-      const keyStatus: string = await invoke("get_api_key");
-      const hasKey = keyStatus === "set";
-      setApiKeySet(hasKey);
-
-      // Check if index exists
-      const hasIndex: boolean = await invoke("check_index_exists");
-
-      // Check if currently indexing
-      const status: { status: string } = await invoke("get_indexer_status");
+      // Check indexer status to determine which screen to show
+      const status: { status: string; files_done: number; files_total: number } = await invoke("get_indexer_status");
 
       if (status.status === "running" || status.status === "paused") {
         setScreen("indexing");
-      } else if (hasIndex) {
+      } else if (status.files_total > 0) {
+        // Previously indexed — go to search
         setScreen("search");
       } else {
         setScreen("setup");
@@ -40,8 +32,6 @@ export function useAppState() {
   return {
     screen,
     setScreen,
-    apiKeySet,
-    setApiKeySet,
     refreshState: checkState,
   };
 }

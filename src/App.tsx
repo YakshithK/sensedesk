@@ -6,7 +6,7 @@ import { useSearch } from "./hooks/useSearch";
 import { useAppState } from "./hooks/useAppState";
 import { SettingsIcon, Sparkles, Loader2 } from "lucide-react";
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+
 import "./App.css";
 
 function App() {
@@ -70,22 +70,22 @@ function App() {
           <div className="max-w-md glass-strong rounded-2xl p-5">
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium mb-2 text-muted-foreground">Gemini API Key</label>
-                <input
-                  type="password"
-                  placeholder="AIzaSy..."
-                  className="w-full px-4 py-2.5 rounded-xl border border-border bg-background/50 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary transition-all"
-                  onChange={async (e) => {
-                    try {
-                      await invoke("set_api_key", { key: e.target.value });
-                    } catch (err) {
-                      console.error("Failed to set API key:", err);
-                    }
-                  }}
-                />
+                <label className="block text-sm font-medium mb-2 text-muted-foreground">Gemini API</label>
+                <div className="flex items-center gap-2 px-4 py-2.5 rounded-xl border border-border bg-background/50 text-sm">
+                  <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                  <span className="text-muted-foreground">API key configured</span>
+                </div>
                 <p className="text-xs text-muted-foreground/70 mt-2">
-                  Used for generating embeddings. Never shared or stored remotely.
+                  Embeddings powered by Gemini Embedding 2. All data stays local.
                 </p>
+              </div>
+              <div>
+                <button
+                  onClick={() => setScreen("setup")}
+                  className="w-full px-4 py-2.5 rounded-xl border border-border bg-background/50 text-sm text-muted-foreground hover:text-foreground hover:bg-muted transition-all"
+                >
+                  Re-index folders
+                </button>
               </div>
             </div>
           </div>

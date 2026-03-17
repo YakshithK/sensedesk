@@ -6,9 +6,40 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::path::PathBuf;
 
-/// API key baked in at compile time. Set VISH_API_KEY env var when building.
-/// Falls back to empty string if not set (user can enter it via Settings UI at runtime).
+/// API key resolution order:
+/// 1. VISH_API_KEY baked in at compile time (CI builds)
+/// 2. GEMINI_API_KEY baked in at compile time (dev builds)
+/// 3. GEMINI_API_KEY from runtime environment
+/// 4. GEMINI_API_KEY from .env file
+/// 5. Empty (user must enter in Settings — not expected for shipped builds)
 const BUNDLED_API_KEY: Option<&str> = option_env!("VISH_API_KEY");
+const BUNDLED_GEMINI_KEY: Option<&str> = option_env!("GEMINI_API_KEY");
+
+fn resolve_api_key() -> String {
+    // 1. Compile-time VISH_API_KEY (CI)
+    if let Some(key) = BUNDLED_API_KEY {
+        if !key.is_empty() { return key.to_string(); }
+    }
+    // 2. Compile-time GEMINI_API_KEY (dev)
+    if let Some(key) = BUNDLED_GEMINI_KEY {
+        if !key.is_empty() { return key.to_string(); }
+    }
+    // 3. Runtime env var
+    if let Ok(key) = std::env::var("GEMINI_API_KEY") {
+        if !key.is_empty() { return key; }
+    }
+    // 4. .env file in current dir or project root
+    if let Ok(contents) = std::fs::read_to_string(".env") {
+        for line in contents.lines() {
+            let line = line.trim();
+            if let Some(val) = line.strip_prefix("GEMINI_API_KEY=") {
+                let val = val.trim().trim_matches('"').trim_matches('\'');
+                if !val.is_empty() { return val.to_string(); }
+            }
+        }
+    }
+    String::new()
+}
 
 pub struct AppState {
     pub api_key: Arc<tokio::sync::Mutex<String>>,
@@ -22,10 +53,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(data_dir: PathBuf) -> Self {
-        let api_key = BUNDLED_API_KEY
-            .map(|k| k.to_string())
-            .or_else(|| std::env::var("GEMINI_API_KEY").ok())
-            .unwrap_or_default();
+        let api_key = resolve_api_key();
 
         let vector_dir = data_dir.join("vectors");
         let vector_store = crate::store::vector::VectorStore::new(vector_dir)

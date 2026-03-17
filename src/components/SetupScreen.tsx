@@ -1,31 +1,15 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { KeyRound, FolderOpen, ArrowRight, Sparkles } from "lucide-react";
+import { FolderOpen, ArrowRight, Sparkles } from "lucide-react";
 
 interface SetupScreenProps {
   onStartIndexing: () => void;
 }
 
 export function SetupScreen({ onStartIndexing }: SetupScreenProps) {
-  const [apiKey, setApiKey] = useState("");
   const [folderPath, setFolderPath] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [step, setStep] = useState<1 | 2>(1);
-
-  const handleSetKey = async () => {
-    if (!apiKey.trim()) {
-      setError("Please enter your Gemini API key.");
-      return;
-    }
-    try {
-      await invoke("set_api_key", { key: apiKey.trim() });
-      setError(null);
-      setStep(2);
-    } catch (e: any) {
-      setError(e.toString());
-    }
-  };
 
   const handleStartIndexing = async () => {
     if (!folderPath.trim()) {
@@ -59,80 +43,46 @@ export function SetupScreen({ onStartIndexing }: SetupScreenProps) {
           <p className="text-muted-foreground text-sm mt-2">Semantic search for your desktop</p>
         </div>
 
-        {/* Setup Card */}
+        {/* Folder Selection Card */}
         <div className="w-full glass-strong rounded-2xl p-6 shadow-2xl">
-          {step === 1 ? (
-            <div className="animate-fade-in">
-              <div className="flex items-center gap-2 mb-4">
-                <KeyRound className="w-5 h-5 text-primary" />
-                <h2 className="text-lg font-semibold">Connect your API key</h2>
-              </div>
-              <p className="text-sm text-muted-foreground mb-4">
-                Enter your Gemini API key to enable semantic search. Your key stays local and is never shared.
-              </p>
-              <input
-                type="password"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleSetKey()}
-                placeholder="AIzaSy..."
-                className="w-full px-4 py-3 rounded-xl border border-border bg-background/50 text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary transition-all text-sm"
-                autoFocus
-              />
-              <button
-                onClick={handleSetKey}
-                className="w-full mt-4 px-4 py-3 bg-primary text-primary-foreground rounded-xl font-semibold text-sm hover:opacity-90 transition-all flex items-center justify-center gap-2 shadow-lg shadow-primary/20"
-              >
-                Continue
-                <ArrowRight className="w-4 h-4" />
-              </button>
+          <div className="animate-fade-in">
+            <div className="flex items-center gap-2 mb-4">
+              <FolderOpen className="w-5 h-5 text-primary" />
+              <h2 className="text-lg font-semibold">Choose a folder to index</h2>
             </div>
-          ) : (
-            <div className="animate-fade-in">
-              <div className="flex items-center gap-2 mb-4">
-                <FolderOpen className="w-5 h-5 text-primary" />
-                <h2 className="text-lg font-semibold">Choose a folder to index</h2>
-              </div>
-              <p className="text-sm text-muted-foreground mb-4">
-                Enter the full path to the folder you want to search through. All files will be indexed.
-              </p>
-              <input
-                type="text"
-                value={folderPath}
-                onChange={(e) => setFolderPath(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleStartIndexing()}
-                placeholder="/home/user/documents"
-                className="w-full px-4 py-3 rounded-xl border border-border bg-background/50 text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary transition-all text-sm font-mono"
-                autoFocus
-              />
-              <button
-                onClick={handleStartIndexing}
-                disabled={isLoading}
-                className="w-full mt-4 px-4 py-3 bg-primary text-primary-foreground rounded-xl font-semibold text-sm hover:opacity-90 transition-all flex items-center justify-center gap-2 shadow-lg shadow-primary/20 disabled:opacity-50"
-              >
-                {isLoading ? (
-                  <>Initializing...</>
-                ) : (
-                  <>
-                    Start Indexing
-                    <ArrowRight className="w-4 h-4" />
-                  </>
-                )}
-              </button>
-            </div>
-          )}
+            <p className="text-sm text-muted-foreground mb-4">
+              Enter the full path to the folder you want to search through. All files will be indexed using AI embeddings.
+            </p>
+            <input
+              type="text"
+              value={folderPath}
+              onChange={(e) => setFolderPath(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleStartIndexing()}
+              placeholder="/home/user/documents"
+              className="w-full px-4 py-3 rounded-xl border border-border bg-background/50 text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary transition-all text-sm font-mono"
+              autoFocus
+            />
+            <button
+              onClick={handleStartIndexing}
+              disabled={isLoading}
+              className="w-full mt-4 px-4 py-3 bg-primary text-primary-foreground rounded-xl font-semibold text-sm hover:opacity-90 transition-all flex items-center justify-center gap-2 shadow-lg shadow-primary/20 disabled:opacity-50"
+            >
+              {isLoading ? (
+                <>Initializing...</>
+              ) : (
+                <>
+                  Start Indexing
+                  <ArrowRight className="w-4 h-4" />
+                </>
+              )}
+            </button>
+          </div>
 
           {error && (
             <div className="mt-3 px-3 py-2 rounded-lg bg-destructive/10 text-destructive text-xs">
               {error}
             </div>
           )}
-        </div>
-
-        {/* Step indicators */}
-        <div className="flex items-center gap-2 mt-6">
-          <div className={`w-2 h-2 rounded-full transition-all ${step === 1 ? "bg-primary w-6" : "bg-muted-foreground/30"}`} />
-          <div className={`w-2 h-2 rounded-full transition-all ${step === 2 ? "bg-primary w-6" : "bg-muted-foreground/30"}`} />
         </div>
       </div>
     </div>
