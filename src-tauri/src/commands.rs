@@ -239,7 +239,8 @@ pub async fn start_indexing(folders: Vec<String>, state: State<'_, AppState>) ->
                         &bytes,
                     );
                     
-                    let req = crate::embedding::client::make_binary_request(&b64, mime);
+                    let filename = fp.file_name().unwrap_or_default().to_string_lossy();
+                    let req = crate::embedding::client::make_binary_request(&b64, mime, Some(&filename));
                     match crate::embedding::client::batch_embed(&hc, &api_key, vec![req]).await {
                         Ok(embeddings) => {
                             if let Some(embedding) = embeddings.into_iter().next() {
@@ -284,9 +285,10 @@ pub async fn start_indexing(folders: Vec<String>, state: State<'_, AppState>) ->
                         return;
                     }
 
+                    let filename = fp.file_name().unwrap_or_default().to_string_lossy();
                     for batch in chunks.chunks(EMBED_BATCH_SIZE) {
                         let embed_requests: Vec<_> = batch.iter()
-                            .map(|chunk| crate::embedding::client::make_text_request(chunk))
+                            .map(|chunk| crate::embedding::client::make_text_request(chunk, Some(&filename)))
                             .collect();
 
                         let embeddings = match crate::embedding::client::batch_embed(

@@ -10,7 +10,7 @@ const GEMINI_EMBED_URL: &str = "https://generativelanguage.googleapis.com/v1beta
 const EMBED_DIMENSION: u32 = 768;
 
 /// Build an EmbedRequest for a text chunk (used during indexing)
-pub fn make_text_request(text: &str) -> EmbedRequest {
+pub fn make_text_request(text: &str, title: Option<&str>) -> EmbedRequest {
     EmbedRequest {
         model: GEMINI_MODEL.to_string(),
         content: Content {
@@ -21,26 +21,35 @@ pub fn make_text_request(text: &str) -> EmbedRequest {
         },
         task_type: "RETRIEVAL_DOCUMENT".to_string(),
         output_dimensionality: EMBED_DIMENSION,
-        title: None,
+        title: title.map(|t| t.to_string()),
     }
 }
 
 /// Build an EmbedRequest for a binary file (PDF, image, etc.)
-pub fn make_binary_request(base64_data: &str, mime_type: &str) -> EmbedRequest {
+pub fn make_binary_request(base64_data: &str, mime_type: &str, title: Option<&str>) -> EmbedRequest {
+    let mut parts = Vec::new();
+    
+    if let Some(t) = title {
+        parts.push(Part {
+            text: Some(format!("File: {}", t)),
+            inline_data: None,
+        });
+    }
+
+    parts.push(Part {
+        text: None,
+        inline_data: Some(InlineData {
+            mime_type: mime_type.to_string(),
+            data: base64_data.to_string(),
+        }),
+    });
+
     EmbedRequest {
         model: GEMINI_MODEL.to_string(),
-        content: Content {
-            parts: vec![Part {
-                text: None,
-                inline_data: Some(InlineData {
-                    mime_type: mime_type.to_string(),
-                    data: base64_data.to_string(),
-                }),
-            }],
-        },
+        content: Content { parts },
         task_type: "RETRIEVAL_DOCUMENT".to_string(),
         output_dimensionality: EMBED_DIMENSION,
-        title: None,
+        title: title.map(|t| t.to_string()),
     }
 }
 
