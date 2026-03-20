@@ -1,19 +1,15 @@
 import { useState, FormEvent } from "react";
-import { SearchIcon, Loader2, X, Settings } from "lucide-react";
+import { SearchIcon, Loader2 } from "lucide-react";
 
 interface SearchBarProps {
   onSearch: (query: string) => void;
   isLoading: boolean;
-  onSettingsClick?: () => void;
-  onClose?: () => void;
   compact?: boolean;
 }
 
 export function SearchBar({
   onSearch,
   isLoading,
-  onSettingsClick,
-  onClose,
   compact = false,
 }: SearchBarProps) {
   const [query, setQuery] = useState("");
@@ -27,7 +23,7 @@ export function SearchBar({
   };
 
   return (
-    <div className={`w-full px-6 ${compact ? "py-2" : "py-4"}`}>
+    <div className={`w-full px-6 ${compact ? "py-3" : "py-4"}`}>
       <div className="relative max-w-2xl mx-auto">
         {/* Subtle glass halo when focused */}
         <div
@@ -42,35 +38,17 @@ export function SearchBar({
           }}
         />
 
-        {/* Action buttons (non-compact mode) */}
-        {!compact && (onClose || onSettingsClick) && (
-          <div className="absolute right-0 top-[-40px] flex items-center gap-2">
-            {onSettingsClick && (
-              <button
-                onClick={onSettingsClick}
-                className="glass p-2 rounded-xl text-frost/45 border border-transparent hover:border-primary/35 hover:text-primary transition-all font-bold"
-              >
-                <Settings className="w-5 h-5" />
-              </button>
-            )}
-            {onClose && (
-              <button
-                onClick={onClose}
-                className="glass p-2 rounded-xl text-frost/45 border border-transparent hover:border-destructive/30 hover:text-destructive transition-all"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            )}
-          </div>
-        )}
-
         {/* The Command Bar */}
         <form onSubmit={handleSubmit} className="relative group">
           <div className={`absolute inset-y-0 left-6 flex items-center pointer-events-none transition-all duration-500`}>
             {isLoading ? (
-              <Loader2 className={`${compact ? "w-5 h-5" : "w-8 h-8"} text-primary animate-spin`} />
+              <Loader2
+                className={`${compact ? "w-5 h-5" : "w-6 h-6"} text-accent animate-spin`}
+              />
             ) : (
-              <SearchIcon className={`${compact ? "w-5 h-5" : "w-8 h-8"} text-frost/45 group-focus-within:text-primary transition-colors duration-300 drop-shadow`} />
+              <SearchIcon
+                className={`${compact ? "w-5 h-5" : "w-6 h-6"} text-frost/45 group-focus-within:text-accent transition-colors duration-300`}
+              />
             )}
           </div>
           <input
@@ -80,11 +58,13 @@ export function SearchBar({
             onFocus={() => setIsFocused(true)}
             onBlur={() => setIsFocused(false)}
             placeholder="Ask Vish anything... e.g. 'That PDF about marketing...' or 'Q3 Finances'"
-            className={`w-full ${compact ? "pl-14 pr-6 py-4 text-base" : "pl-16 pr-8 py-6 text-xl md:text-2xl"} 
+            className={`w-full ${
+              compact ? "pl-14 pr-6 py-4 text-base" : "pl-14 pr-7 py-5 text-lg md:text-xl"
+            } 
                        rounded-[2rem] text-frost placeholder:text-frost/30 font-display
-                       focus:outline-none transition-all duration-500 glass-strong shadow-2xl
-                       border ${isFocused ? "border-primary/55 glow-cyan-strong" : "border-primary/10"}
-                       ${isLoading ? "border-accent/45 glow-violet-strong" : ""}`}
+                       focus:outline-none transition-all duration-500 glass-strong
+                       border ${isFocused ? "border-accent/70" : "border-accent/15"}
+                       ${isLoading ? "border-accent/45" : ""}`}
             autoFocus
           />
         </form>

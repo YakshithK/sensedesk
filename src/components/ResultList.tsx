@@ -10,7 +10,7 @@ interface ResultListProps {
 function FileTypeBadge({ type }: { type: string }) {
   const label = type.toLowerCase();
   return (
-    <span className="inline-flex items-center px-3 py-1 rounded-full text-[11px] font-mono tracking-[0.22em] uppercase border border-primary/20 bg-primary/5 text-primary/80">
+    <span className="inline-flex items-center px-3 py-1 rounded-full text-[11px] font-mono tracking-[0.22em] uppercase border border-accent/20 bg-accent/5 text-accent/80">
       {label}
     </span>
   );
@@ -82,7 +82,7 @@ export function ResultList({ results }: ResultListProps) {
     selectedIdx !== null ? uniqueResults[selectedIdx] : null;
 
   return (
-    <div className="flex gap-6 px-8 py-6 w-full max-w-7xl mx-auto">
+    <div className="flex flex-col gap-6 px-8 py-6 w-full max-w-7xl mx-auto lg:flex-row">
       {/* Result cards */}
       <div className="flex-1 flex flex-col gap-2.5 overflow-y-auto min-w-0">
         <p className="text-xs text-frost/30 mb-1">
@@ -97,10 +97,13 @@ export function ResultList({ results }: ResultListProps) {
           return (
             <div
               key={`${result.path}-${idx}`}
-              className={`relative flex items-start gap-5 p-5 rounded-2xl glass-card cursor-pointer group animate-fade-in border
-                         ${isSelected ? "border-primary/45 glow-cyan-strong" : "border-transparent"}`}
+              className={`relative flex items-start gap-5 p-6 rounded-2xl glass-card cursor-pointer group animate-fade-in border
+                         ${isSelected ? "border-accent/45" : "border-transparent"}`}
               style={{ animationDelay: `${idx * 50}ms` }}
-              onClick={() => handleOpen(result.path)}
+              onClick={() => {
+                setSelectedIdx(idx);
+                handleOpen(result.path);
+              }}
               onMouseEnter={() => setSelectedIdx(idx)}
             >
               {/* File type badge */}
@@ -110,16 +113,16 @@ export function ResultList({ results }: ResultListProps) {
 
               {/* Center: filename + snippet */}
               <div className="min-w-0 flex-1">
-                <h3 className="font-display font-semibold text-lg text-frost/90 truncate mb-1">
+                <h3 className="font-display font-semibold text-base md:text-lg text-frost/90 truncate mb-1">
                   {fileName}
                 </h3>
                 {result.text_excerpt && (
                   <div className="mt-3">
-                    <span className="text-[10px] font-semibold uppercase tracking-[0.25em] text-primary/70 mb-1.5 block">
+                    <span className="text-[10px] font-semibold uppercase tracking-[0.25em] text-accent/70 mb-1.5 block">
                       semantic match
                     </span>
-                    <p className="text-sm text-frost/60 line-clamp-2 leading-relaxed font-body">
-                      {result.text_excerpt.substring(0, 220)}...
+                    <p className="text-sm text-frost/60 line-clamp-4 leading-relaxed font-body">
+                      {result.text_excerpt.substring(0, 260)}...
                     </p>
                   </div>
                 )}
@@ -127,7 +130,7 @@ export function ResultList({ results }: ResultListProps) {
 
               {/* Right: metadata */}
               <div className="flex flex-col items-end gap-2 shrink-0 text-right">
-                <span className="text-[11px] font-mono tracking-[0.18em] text-frost/60 border border-primary/18 bg-primary/5 px-2.5 py-1 rounded-full">
+                <span className="text-[12px] font-mono tracking-[0.18em] text-frost/60 border border-accent/18 bg-accent/5 px-2.5 py-1 rounded-full">
                   {relevance}%
                 </span>
                 <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-all">
@@ -152,11 +155,38 @@ export function ResultList({ results }: ResultListProps) {
         })}
       </div>
 
-      {/* Quick Look preview panel */}
+      {/* Quick Look (small screens) */}
       {selectedResult && (
-        <div className="w-80 shrink-0 glass-strong rounded-[2rem] p-6 animate-fade-in-scale hidden lg:flex flex-col shadow-2xl border border-white/5">
+        <div className="w-full glass-strong rounded-[2rem] p-6 animate-fade-in-scale lg:hidden border border-white/5">
           <div className="flex items-center justify-between mb-4">
-            <h4 className="text-[10px] font-bold uppercase tracking-widest text-primary/70">
+            <h4 className="text-[10px] font-bold uppercase tracking-widest text-accent/70">
+              quick look
+            </h4>
+            <FileTypeBadge type={selectedResult.file_type} />
+          </div>
+
+          <p className="text-base text-frost font-display font-semibold truncate mb-2">
+            {selectedResult.path.split("/").pop() ||
+              selectedResult.path.split("\\").pop()}
+          </p>
+          <p className="text-xs text-frost/35 truncate font-mono" title={selectedResult.path}>
+            {selectedResult.path}
+          </p>
+          {selectedResult.text_excerpt && (
+            <div className="mt-4 pt-4 border-t border-white/5">
+              <p className="text-sm text-frost/55 line-clamp-4 leading-relaxed font-body">
+                {selectedResult.text_excerpt.substring(0, 340)}
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Quick Look (large screens) */}
+      {selectedResult && (
+        <div className="w-80 shrink-0 glass-strong rounded-[2rem] p-6 animate-fade-in-scale hidden lg:flex flex-col border border-white/5">
+          <div className="flex items-center justify-between mb-4">
+            <h4 className="text-[10px] font-bold uppercase tracking-widest text-accent/70">
               quick look
             </h4>
             <FileTypeBadge type={selectedResult.file_type} />
@@ -171,8 +201,8 @@ export function ResultList({ results }: ResultListProps) {
           </p>
           {selectedResult.text_excerpt && (
             <div className="mt-4 pt-4 border-t border-white/5">
-              <p className="text-xs text-frost/55 line-clamp-5 leading-relaxed font-body">
-                {selectedResult.text_excerpt.substring(0, 280)}
+              <p className="text-xs text-frost/55 line-clamp-4 leading-relaxed font-body">
+                {selectedResult.text_excerpt.substring(0, 320)}
               </p>
             </div>
           )}
