@@ -1,11 +1,11 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::Command;
 use tauri::State;
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// API key resolution order:
 /// 1. VISH_API_KEY baked in at compile time (CI builds)
@@ -43,6 +43,7 @@ fn resolve_api_key() -> String {
 }
 
 pub struct AppState {
+    pub data_dir: PathBuf,
     pub api_key: Arc<tokio::sync::Mutex<String>>,
     pub http_client: reqwest::Client,
     pub vector_store: Arc<crate::store::vector::VectorStore>,
@@ -50,6 +51,32 @@ pub struct AppState {
     pub files_total: Arc<AtomicU32>,
     pub status: Arc<tokio::sync::Mutex<String>>,
     pub indexed_files: Arc<tokio::sync::Mutex<Vec<PathBuf>>>,
+    pub watched_roots: Arc<tokio::sync::Mutex<Vec<PathBuf>>>,
+    pub sync_status: Arc<tokio::sync::Mutex<String>>,
+    pub watcher_generation: Arc<AtomicU32>,
+}
+
+#[derive(Clone)]
+struct WatchRuntime {
+    watched_roots: Arc<tokio::sync::Mutex<Vec<PathBuf>>>,
+    sync_status: Arc<tokio::sync::Mutex<String>>,
+    watcher_generation: Arc<AtomicU32>,
+    vector_store: Arc<crate::store::vector::VectorStore>,
+    http_client: reqwest::Client,
+    api_key: Arc<tokio::sync::Mutex<String>>,
+}
+
+#[derive(Clone)]
+struct IndexingRuntime {
+    files_done: Arc<AtomicU32>,
+    files_total: Arc<AtomicU32>,
+    status: Arc<tokio::sync::Mutex<String>>,
+    indexed_files: Arc<tokio::sync::Mutex<Vec<PathBuf>>>,
+    vector_store: Arc<crate::store::vector::VectorStore>,
+    http_client: reqwest::Client,
+    api_key: Arc<tokio::sync::Mutex<String>>,
+    sync_status: Arc<tokio::sync::Mutex<String>>,
+    watch: WatchRuntime,
 }
 
 impl AppState {
@@ -59,8 +86,10 @@ impl AppState {
         let vector_dir = data_dir.join("vectors");
         let vector_store = crate::store::vector::VectorStore::new(vector_dir)
             .expect("Failed to initialize vector store");
+        let watched_roots = load_watched_roots(&data_dir).unwrap_or_default();
 
         Self {
+            data_dir,
             api_key: Arc::new(tokio::sync::Mutex::new(api_key)),
             http_client: reqwest::Client::new(),
             vector_store: Arc::new(vector_store),
@@ -68,6 +97,34 @@ impl AppState {
             files_total: Arc::new(AtomicU32::new(0)),
             status: Arc::new(tokio::sync::Mutex::new("idle".to_string())),
             indexed_files: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            watched_roots: Arc::new(tokio::sync::Mutex::new(watched_roots)),
+            sync_status: Arc::new(tokio::sync::Mutex::new("idle".to_string())),
+            watcher_generation: Arc::new(AtomicU32::new(0)),
+        }
+    }
+
+    fn watch_runtime(&self) -> WatchRuntime {
+        WatchRuntime {
+            watched_roots: self.watched_roots.clone(),
+            sync_status: self.sync_status.clone(),
+            watcher_generation: self.watcher_generation.clone(),
+            vector_store: self.vector_store.clone(),
+            http_client: self.http_client.clone(),
+            api_key: self.api_key.clone(),
+        }
+    }
+
+    fn indexing_runtime(&self) -> IndexingRuntime {
+        IndexingRuntime {
+            files_done: self.files_done.clone(),
+            files_total: self.files_total.clone(),
+            status: self.status.clone(),
+            indexed_files: self.indexed_files.clone(),
+            vector_store: self.vector_store.clone(),
+            http_client: self.http_client.clone(),
+            api_key: self.api_key.clone(),
+            sync_status: self.sync_status.clone(),
+            watch: self.watch_runtime(),
         }
     }
 }
@@ -85,6 +142,11 @@ const CHUNK_OVERLAP: usize = 64;
 const EMBED_BATCH_SIZE: usize = 100; // Gemini supports up to 100 per batch
 const MAX_CONCURRENT_FILES: usize = 8;
 
+#[derive(Serialize, Deserialize)]
+struct PersistedRoots {
+    roots: Vec<String>,
+}
+
 // Map file extension to MIME type for native Gemini multimodal embedding
 fn mime_for_ext(ext: &str) -> Option<&'static str> {
     match ext {
@@ -99,6 +161,372 @@ fn mime_for_ext(ext: &str) -> Option<&'static str> {
         "m4a" => Some("audio/mp4"),
         _ => None,
     }
+}
+
+fn watched_roots_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("indexed-roots.json")
+}
+
+fn load_watched_roots(data_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let path = watched_roots_path(data_dir);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let contents = std::fs::read_to_string(path)?;
+    let persisted: PersistedRoots = serde_json::from_str(&contents)?;
+    Ok(persisted.roots.into_iter().map(PathBuf::from).collect())
+}
+
+fn save_watched_roots(data_dir: &Path, roots: &[PathBuf]) -> anyhow::Result<()> {
+    std::fs::create_dir_all(data_dir)?;
+    let contents = serde_json::to_string_pretty(&PersistedRoots {
+        roots: roots
+            .iter()
+            .map(|root| root.to_string_lossy().to_string())
+            .collect(),
+    })?;
+    std::fs::write(watched_roots_path(data_dir), contents)?;
+    Ok(())
+}
+
+async fn set_sync_status(sync_status: &tokio::sync::Mutex<String>, value: &str) {
+    *sync_status.lock().await = value.to_string();
+}
+
+fn canonicalize_root(path: &Path) -> Result<PathBuf, String> {
+    if !path.exists() || !path.is_dir() {
+        return Err(format!("Invalid directory path: {}", path.display()));
+    }
+
+    std::fs::canonicalize(path)
+        .map_err(|error| format!("Failed to access {}: {}", path.display(), error))
+}
+
+fn build_image_thumbnail(path: &str, file_type: &str) -> Option<String> {
+    let mime = match file_type {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        _ => return None,
+    };
+
+    let bytes = std::fs::read(path).ok()?;
+    let encoded = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        bytes,
+    );
+    Some(format!("data:{};base64,{}", mime, encoded))
+}
+
+async fn index_single_file(
+    fp: PathBuf,
+    vector_store: Arc<crate::store::vector::VectorStore>,
+    http_client: reqwest::Client,
+    api_key_arc: Arc<tokio::sync::Mutex<String>>,
+    next_point_id: Arc<AtomicU32>,
+) {
+    let ext = fp
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let api_key = api_key_arc.lock().await.clone();
+    let path_str = fp.display().to_string();
+    if let Err(error) = vector_store.delete_by_payload("path", &path_str).await {
+        eprintln!("Failed removing stale vectors for {:?}: {}", fp, error);
+    }
+
+    if let Some(mime) = mime_for_ext(&ext) {
+        let bytes = match std::fs::read(&fp) {
+            Ok(bytes) => bytes,
+            Err(_) => return,
+        };
+
+        if bytes.len() > 10 * 1024 * 1024 {
+            return;
+        }
+
+        let b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &bytes,
+        );
+
+        let filename = fp.file_name().unwrap_or_default().to_string_lossy();
+        let req = crate::embedding::client::make_binary_request(&b64, mime, Some(&filename));
+        match crate::embedding::client::batch_embed(&http_client, &api_key, vec![req]).await {
+            Ok(embeddings) => {
+                if let Some(embedding) = embeddings.into_iter().next() {
+                    let point_id = next_point_id.fetch_add(1, Ordering::SeqCst) as u64;
+                    let mut payload = std::collections::HashMap::new();
+                    payload.insert("path".to_string(), fp.display().to_string());
+                    payload.insert("file_type".to_string(), ext.clone());
+                    payload.insert(
+                        "chunk_text".to_string(),
+                        format!(
+                            "[{} file: {}]",
+                            ext.to_uppercase(),
+                            fp.file_name().unwrap_or_default().to_string_lossy()
+                        ),
+                    );
+
+                    let point = crate::store::vector::StoredPoint {
+                        id: point_id,
+                        vector: embedding,
+                        payload,
+                    };
+                    if let Err(error) = vector_store.upsert(vec![point]).await {
+                        eprintln!("Vector store error: {}", error);
+                    }
+                }
+            }
+            Err(error) => eprintln!("Embed error for {:?}: {}", fp, error),
+        }
+        return;
+    }
+
+    let text = match crate::indexer::extractor::extract_content(&fp) {
+        Ok(text) => text,
+        Err(_) => return,
+    };
+
+    if text.trim().is_empty() {
+        return;
+    }
+
+    let chunks = crate::indexer::chunker::chunk_text_for_extension(
+        &text,
+        &ext,
+        CHUNK_TOKENS,
+        CHUNK_OVERLAP,
+    );
+
+    if chunks.is_empty() {
+        return;
+    }
+
+    let filename = fp.file_name().unwrap_or_default().to_string_lossy();
+    for batch in chunks.chunks(EMBED_BATCH_SIZE) {
+        let requests: Vec<_> = batch
+            .iter()
+            .map(|chunk| crate::embedding::client::make_text_request(chunk, Some(&filename)))
+            .collect();
+
+        let embeddings = match crate::embedding::client::batch_embed(
+            &http_client,
+            &api_key,
+            requests,
+        )
+        .await
+        {
+            Ok(embeddings) => embeddings,
+            Err(error) => {
+                eprintln!("Embed error for {:?}: {}", fp, error);
+                continue;
+            }
+        };
+
+        let mut points = Vec::new();
+        for (idx, embedding) in embeddings.into_iter().enumerate() {
+            let chunk_text = batch.get(idx).cloned().unwrap_or_default();
+            let point_id = next_point_id.fetch_add(1, Ordering::SeqCst) as u64;
+            let mut payload = std::collections::HashMap::new();
+            payload.insert("path".to_string(), fp.display().to_string());
+            payload.insert("file_type".to_string(), ext.clone());
+            payload.insert(
+                "chunk_text".to_string(),
+                chunk_text.chars().take(500).collect(),
+            );
+
+            points.push(crate::store::vector::StoredPoint {
+                id: point_id,
+                vector: embedding,
+                payload,
+            });
+        }
+
+        if let Err(error) = vector_store.upsert(points).await {
+            eprintln!("Vector store error: {}", error);
+        }
+    }
+}
+
+async fn process_watch_actions(
+    actions: Vec<crate::indexer::watcher::WatchAction>,
+    vector_store: Arc<crate::store::vector::VectorStore>,
+    http_client: reqwest::Client,
+    api_key_arc: Arc<tokio::sync::Mutex<String>>,
+    sync_status: Arc<tokio::sync::Mutex<String>>,
+) {
+    if actions.is_empty() {
+        return;
+    }
+
+    set_sync_status(&sync_status, "syncing").await;
+    let next_point_id = Arc::new(AtomicU32::new(
+        vector_store
+            .max_point_id()
+            .await
+            .map(|id| id as u32 + 1)
+            .unwrap_or(0),
+    ));
+
+    for action in actions {
+        match action {
+            crate::indexer::watcher::WatchAction::Upsert(path) => {
+                if !path.exists() || !crate::indexer::crawler::is_allowed_file(&path) {
+                    continue;
+                }
+                index_single_file(
+                    path,
+                    vector_store.clone(),
+                    http_client.clone(),
+                    api_key_arc.clone(),
+                    next_point_id.clone(),
+                )
+                .await;
+            }
+            crate::indexer::watcher::WatchAction::Delete(path) => {
+                if let Err(error) = vector_store
+                    .delete_by_payload("path", &path.display().to_string())
+                    .await
+                {
+                    eprintln!("Failed deleting removed file {:?}: {}", path, error);
+                }
+            }
+        }
+    }
+
+    if let Err(error) = vector_store.flush().await {
+        eprintln!("Watcher flush error: {}", error);
+    }
+    set_sync_status(&sync_status, "idle").await;
+}
+
+async fn restart_watcher(runtime: WatchRuntime) {
+    let roots = runtime.watched_roots.lock().await.clone();
+
+    let generation = runtime.watcher_generation.fetch_add(1, Ordering::SeqCst) + 1;
+
+    if roots.is_empty() {
+        let sync_status = runtime.sync_status.clone();
+        set_sync_status(&sync_status, "idle").await;
+        return;
+    }
+
+    let vector_store = runtime.vector_store.clone();
+    let http_client = runtime.http_client.clone();
+    let api_key = runtime.api_key.clone();
+    let sync_status = runtime.sync_status.clone();
+    let generation_counter = runtime.watcher_generation.clone();
+    let handler: Arc<dyn Fn(Vec<crate::indexer::watcher::WatchAction>) + Send + Sync> =
+        Arc::new(move |actions| {
+            let vector_store = vector_store.clone();
+            let http_client = http_client.clone();
+            let api_key = api_key.clone();
+            let sync_status = sync_status.clone();
+            tauri::async_runtime::spawn(async move {
+                process_watch_actions(actions, vector_store, http_client, api_key, sync_status)
+                    .await;
+            });
+        });
+
+    if let Err(error) = crate::indexer::watcher::spawn_fs_watcher(
+        roots,
+        generation,
+        generation_counter,
+        handler,
+    ) {
+        eprintln!("Failed restarting watcher: {}", error);
+    }
+}
+
+fn spawn_indexing_job(paths: Vec<PathBuf>, runtime: IndexingRuntime, clear_existing: bool, restart_watch_after: bool) {
+    tokio::spawn(async move {
+        *runtime.status.lock().await = "running".to_string();
+        set_sync_status(&runtime.sync_status, "syncing").await;
+
+        if clear_existing {
+            if let Err(error) = runtime.vector_store.clear().await {
+                eprintln!("Failed to clear old index: {}", error);
+            }
+        }
+
+        let all_files: Vec<PathBuf> = crate::indexer::crawler::crawl(&paths).collect();
+        runtime.files_total.store(all_files.len() as u32, Ordering::SeqCst);
+        runtime.files_done.store(0, Ordering::SeqCst);
+        runtime.indexed_files.lock().await.clear();
+
+        let next_point_id = Arc::new(AtomicU32::new(
+            runtime
+                .vector_store
+                .max_point_id()
+                .await
+                .map(|id| id as u32 + 1)
+                .unwrap_or(0),
+        ));
+
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_FILES));
+        let mut handles = Vec::new();
+
+        for file_path in all_files {
+            let st = runtime.status.lock().await.clone();
+            if st == "idle" {
+                break;
+            }
+
+            loop {
+                let st = runtime.status.lock().await.clone();
+                if st == "running" {
+                    break;
+                }
+                if st == "idle" {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+
+            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            let vector_store = runtime.vector_store.clone();
+            let http_client = runtime.http_client.clone();
+            let api_key_arc = runtime.api_key.clone();
+            let files_done = runtime.files_done.clone();
+            let indexed_files = runtime.indexed_files.clone();
+            let next_point_id = next_point_id.clone();
+            let fp = file_path.clone();
+
+            handles.push(tokio::spawn(async move {
+                let _permit = permit;
+                index_single_file(
+                    fp.clone(),
+                    vector_store,
+                    http_client,
+                    api_key_arc,
+                    next_point_id,
+                )
+                .await;
+
+                indexed_files.lock().await.push(fp);
+                files_done.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+
+        for handle in handles {
+            let _ = handle.await;
+        }
+
+        if let Err(error) = runtime.vector_store.flush().await {
+            eprintln!("Final flush error: {}", error);
+        }
+
+        *runtime.status.lock().await = "idle".to_string();
+        set_sync_status(&runtime.sync_status, "idle").await;
+
+        if restart_watch_after {
+            restart_watcher(runtime.watch.clone()).await;
+        }
+    });
 }
 
 #[tauri::command]
@@ -139,215 +567,25 @@ pub async fn start_indexing(folders: Vec<String>, state: State<'_, AppState>) ->
         return Err("No Gemini API key set. Please add your API key in Settings first.".to_string());
     }
 
-    let paths: Vec<PathBuf> = folders.into_iter().map(PathBuf::from).collect();
-    for p in &paths {
-        if !p.exists() || !p.is_dir() {
-            return Err(format!("Invalid directory path: {}", p.display()));
+    let mut paths = Vec::new();
+    for folder in folders {
+        let root = canonicalize_root(Path::new(folder.trim()))?;
+        if !paths.iter().any(|existing| existing == &root) {
+            paths.push(root);
         }
     }
+    if paths.is_empty() {
+        return Err("No valid directories provided to index.".to_string());
+    }
 
-    *state.status.lock().await = "running".to_string();
+    {
+        let mut watched_roots = state.watched_roots.lock().await;
+        *watched_roots = paths.clone();
+        save_watched_roots(&state.data_dir, &watched_roots)
+            .map_err(|error| format!("Failed to save indexed roots: {}", error))?;
+    }
 
-    let files_done = state.files_done.clone();
-    let files_total = state.files_total.clone();
-    let status_arc = state.status.clone();
-    let indexed_files = state.indexed_files.clone();
-    let vector_store = state.vector_store.clone();
-    let http_client = state.http_client.clone();
-    let api_key_arc = state.api_key.clone();
-
-    // NOTE: We do NOT call vector_store.clear() — the index persists across sessions.
-    // Individual files are deduped before re-embedding (see delete_by_payload below).
-    // The next_point_id is derived from max existing ID + 1 to avoid collisions.
-
-    tokio::spawn(async move {
-        // User requested: Re-scanning completely wipes the old index to start fresh
-        if let Err(e) = vector_store.clear().await {
-            eprintln!("Failed to clear old index: {}", e);
-        }
-
-        let all_files: Vec<PathBuf> = crate::indexer::crawler::crawl(&paths).collect();
-        files_total.store(all_files.len() as u32, Ordering::SeqCst);
-        files_done.store(0, Ordering::SeqCst);
-        indexed_files.lock().await.clear();
-
-        let next_point_id = Arc::new(AtomicU32::new(
-            vector_store.max_point_id().await.map(|id| id as u32 + 1).unwrap_or(0)
-        ));
-
-        // Use a semaphore to limit concurrent file processing
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_FILES));
-        let mut handles = Vec::new();
-
-        for (i, file_path) in all_files.into_iter().enumerate() {
-            // Check if stopped
-            {
-                let st = status_arc.lock().await.clone();
-                if st == "idle" { break; }
-            }
-
-            // Wait while paused
-            loop {
-                let st = status_arc.lock().await.clone();
-                if st == "running" { break; }
-                if st == "idle" { return; }
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            }
-
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
-            let vs = vector_store.clone();
-            let hc = http_client.clone();
-            let ak = api_key_arc.clone();
-            let fd = files_done.clone();
-            let idx_files = indexed_files.clone();
-            let pid = next_point_id.clone();
-            let fp = file_path.clone();
-            let _file_idx = i;
-
-            let handle = tokio::spawn(async move {
-                let _permit = permit; // held until this task finishes
-
-                let ext = fp.extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                let api_key = ak.lock().await.clone();
-
-                // Remove any existing vectors for this file before re-embedding
-                let path_str = fp.display().to_string();
-                if let Err(e) = vs.delete_by_payload("path", &path_str).await {
-                    eprintln!("Failed to remove old vectors for {:?}: {}", fp, e);
-                }
-
-                // Check if this file type can be natively embedded by Gemini (PDF, images)
-                if let Some(mime) = mime_for_ext(&ext) {
-                    let bytes = match std::fs::read(&fp) {
-                        Ok(b) => b,
-                        Err(_) => {
-                            fd.fetch_add(1, Ordering::SeqCst);
-                            return;
-                        }
-                    };
-
-                    // Skip very large files (>10MB)
-                    if bytes.len() > 10 * 1024 * 1024 {
-                        fd.fetch_add(1, Ordering::SeqCst);
-                        return;
-                    }
-
-                    let b64 = base64::Engine::encode(
-                        &base64::engine::general_purpose::STANDARD,
-                        &bytes,
-                    );
-                    
-                    let filename = fp.file_name().unwrap_or_default().to_string_lossy();
-                    let req = crate::embedding::client::make_binary_request(&b64, mime, Some(&filename));
-                    match crate::embedding::client::batch_embed(&hc, &api_key, vec![req]).await {
-                        Ok(embeddings) => {
-                            if let Some(embedding) = embeddings.into_iter().next() {
-                                let point_id = pid.fetch_add(1, Ordering::SeqCst) as u64;
-                                let mut payload = std::collections::HashMap::new();
-                                payload.insert("path".to_string(), fp.display().to_string());
-                                payload.insert("file_type".to_string(), ext.clone());
-                                payload.insert("chunk_text".to_string(),
-                                    format!("[{} file: {}]", ext.to_uppercase(),
-                                        fp.file_name().unwrap_or_default().to_string_lossy()));
-
-                                let point = crate::store::vector::StoredPoint {
-                                    id: point_id,
-                                    vector: embedding,
-                                    payload,
-                                };
-                                if let Err(e) = vs.upsert(vec![point]).await {
-                                    eprintln!("Vector store error: {}", e);
-                                }
-                            }
-                        }
-                        Err(e) => eprintln!("Embed error for {:?}: {}", fp, e),
-                    }
-                } else {
-                    // Text-based files: extract → chunk → embed
-                    let text = match crate::indexer::extractor::extract_content(&fp) {
-                        Ok(t) => t,
-                        Err(_) => {
-                            fd.fetch_add(1, Ordering::SeqCst);
-                            return;
-                        }
-                    };
-
-                    if text.trim().is_empty() {
-                        fd.fetch_add(1, Ordering::SeqCst);
-                        return;
-                    }
-
-                    let chunks = crate::indexer::chunker::chunk_text_for_extension(
-                        &text,
-                        &ext,
-                        CHUNK_TOKENS,
-                        CHUNK_OVERLAP,
-                    );
-                    if chunks.is_empty() {
-                        fd.fetch_add(1, Ordering::SeqCst);
-                        return;
-                    }
-
-                    let filename = fp.file_name().unwrap_or_default().to_string_lossy();
-                    for batch in chunks.chunks(EMBED_BATCH_SIZE) {
-                        let embed_requests: Vec<_> = batch.iter()
-                            .map(|chunk| crate::embedding::client::make_text_request(chunk, Some(&filename)))
-                            .collect();
-
-                        let embeddings = match crate::embedding::client::batch_embed(
-                            &hc, &api_key, embed_requests,
-                        ).await {
-                            Ok(e) => e,
-                            Err(err) => {
-                                eprintln!("Embed error for {:?}: {}", fp, err);
-                                continue;
-                            }
-                        };
-
-                        let mut points = Vec::new();
-                        for (j, embedding) in embeddings.into_iter().enumerate() {
-                            let chunk_text = batch.get(j).cloned().unwrap_or_default();
-                            let point_id = pid.fetch_add(1, Ordering::SeqCst) as u64;
-                            let mut payload = std::collections::HashMap::new();
-                            payload.insert("path".to_string(), fp.display().to_string());
-                            payload.insert("file_type".to_string(), ext.clone());
-                            payload.insert("chunk_text".to_string(), chunk_text.chars().take(500).collect());
-
-                            points.push(crate::store::vector::StoredPoint {
-                                id: point_id,
-                                vector: embedding,
-                                payload,
-                            });
-                        }
-
-                        if let Err(e) = vs.upsert(points).await {
-                            eprintln!("Vector store error: {}", e);
-                        }
-                    }
-                }
-
-                idx_files.lock().await.push(fp);
-                fd.fetch_add(1, Ordering::SeqCst);
-            });
-
-            handles.push(handle);
-        }
-
-        // Wait for all spawned tasks to complete
-        for handle in handles {
-            let _ = handle.await;
-        }
-
-        // Final flush to ensure everything is persisted
-        if let Err(e) = vector_store.flush().await {
-            eprintln!("Final flush error: {}", e);
-        }
-
-        *status_arc.lock().await = "idle".to_string();
-    });
+    spawn_indexing_job(paths, state.indexing_runtime(), true, true);
 
     Ok(())
 }
@@ -378,6 +616,90 @@ pub async fn get_indexer_status(state: State<'_, AppState>) -> Result<IndexerSta
     let done = state.files_done.load(Ordering::SeqCst);
     let total = state.files_total.load(Ordering::SeqCst);
     Ok(IndexerStatus { status, files_done: done, files_total: total, eta_secs: None })
+}
+
+#[tauri::command]
+pub async fn get_indexed_roots(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    Ok(state
+        .watched_roots
+        .lock()
+        .await
+        .iter()
+        .map(|root| root.to_string_lossy().to_string())
+        .collect())
+}
+
+#[tauri::command]
+pub async fn add_indexed_root(path: String, state: State<'_, AppState>) -> Result<(), String> {
+    let root = canonicalize_root(Path::new(path.trim()))?;
+
+    {
+        let mut watched_roots = state.watched_roots.lock().await;
+        if watched_roots.iter().any(|existing| existing == &root) {
+            return Ok(());
+        }
+        watched_roots.push(root.clone());
+        save_watched_roots(&state.data_dir, &watched_roots)
+            .map_err(|error| format!("Failed to save indexed roots: {}", error))?;
+    }
+
+    restart_watcher(state.watch_runtime()).await;
+    spawn_indexing_job(vec![root], state.indexing_runtime(), false, false);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn remove_indexed_root(path: String, state: State<'_, AppState>) -> Result<(), String> {
+    let root = PathBuf::from(path.trim());
+    {
+        let mut watched_roots = state.watched_roots.lock().await;
+        watched_roots.retain(|existing| existing != &root);
+        save_watched_roots(&state.data_dir, &watched_roots)
+            .map_err(|error| format!("Failed to save indexed roots: {}", error))?;
+    }
+
+    state
+        .vector_store
+        .delete_by_path_prefix(&root.to_string_lossy())
+        .await
+        .map_err(|error| format!("Failed removing indexed files: {}", error))?;
+    state
+        .vector_store
+        .flush()
+        .await
+        .map_err(|error| format!("Failed persisting vector store: {}", error))?;
+    restart_watcher(state.watch_runtime()).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn reset_index(state: State<'_, AppState>) -> Result<(), String> {
+    {
+        let mut watched_roots = state.watched_roots.lock().await;
+        watched_roots.clear();
+        save_watched_roots(&state.data_dir, &watched_roots)
+            .map_err(|error| format!("Failed clearing indexed roots: {}", error))?;
+    }
+
+    state
+        .vector_store
+        .clear()
+        .await
+        .map_err(|error| format!("Failed clearing vector store: {}", error))?;
+    state
+        .vector_store
+        .flush()
+        .await
+        .map_err(|error| format!("Failed flushing vector store: {}", error))?;
+
+    state.watcher_generation.fetch_add(1, Ordering::SeqCst);
+    set_sync_status(&state.sync_status, "idle").await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_sync_status(state: State<'_, AppState>) -> Result<String, String> {
+    Ok(state.sync_status.lock().await.clone())
 }
 
 #[tauri::command]
@@ -504,16 +826,24 @@ impl FileCandidate {
 
 fn build_search_result(point: &crate::store::vector::ScoredPoint) -> crate::search::SearchResult {
     let path = point.payload.get("path").cloned().unwrap_or_default();
+    let file_type = point.payload.get("file_type").cloned().unwrap_or_default();
     crate::search::SearchResult {
         chunk_id: format!("chk-{}", point.id),
         file_id: path.clone(),
-        path,
-        file_type: point.payload.get("file_type").cloned().unwrap_or_default(),
+        path: path.clone(),
+        file_type: file_type.clone(),
         text_excerpt: point.payload.get("chunk_text").cloned(),
-        thumbnail_path: None,
+        thumbnail_path: build_image_thumbnail(&path, &file_type),
         score: point.score,
         rank: 0,
     }
+}
+
+pub fn bootstrap_watchers(state: &AppState) {
+    let runtime = state.watch_runtime();
+    tauri::async_runtime::spawn(async move {
+        restart_watcher(runtime).await;
+    });
 }
 
 struct QueryFeatures {

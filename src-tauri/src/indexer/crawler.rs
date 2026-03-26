@@ -14,6 +14,21 @@ const ALLOWED_EXT: &[&str] = &[
     "mp4", "mov", "mp3", "wav", "m4a"
 ];
 
+pub fn is_allowed_file(path: &Path) -> bool {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    if file_name.starts_with('.') {
+        return false;
+    }
+
+    path.extension()
+        .and_then(|x| x.to_str())
+        .map(|ext| ALLOWED_EXT.contains(&ext.to_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
 /// Recursively crawls provided root paths and yields matching files.
 pub fn crawl(roots: &[PathBuf]) -> impl Iterator<Item = PathBuf> {
     roots.iter().flat_map(|root| {
@@ -30,15 +45,11 @@ pub fn crawl(roots: &[PathBuf]) -> impl Iterator<Item = PathBuf> {
             .filter(|e| e.file_type().is_file())
             .filter_map(|e| {
                 let path = e.path().to_owned();
-                path.extension()
-                    .and_then(|x| x.to_str())
-                    .and_then(|ext| {
-                        if ALLOWED_EXT.contains(&ext.to_lowercase().as_str()) {
-                            Some(e.into_path())
-                        } else {
-                            None
-                        }
-                    })
+                if is_allowed_file(&path) {
+                    Some(e.into_path())
+                } else {
+                    None
+                }
             })
     }).collect::<Vec<_>>().into_iter() // Collect immediately to satisfy Iterator bounds simply for now
 }

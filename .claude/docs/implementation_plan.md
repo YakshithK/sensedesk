@@ -1,6 +1,8 @@
-# Implementation Plan: SenseDesk
+# Implementation Plan: Vish
 
-**Goal**: Build a local-first desktop application using Tauri (Rust + React) that indexes user files (documents, code, images, small media) using Gemini Embedding 2. It will allow instantaneous semantic search over personal data using a local Qdrant embedded instance.
+> **Historical note:** This was the original implementation plan. The actual build diverged: Qdrant and SQLite were replaced with a custom JSON vector store. Treat this as a design artifact, not a live spec.
+
+**Goal**: Build a local-first desktop application using Tauri (Rust + React) that indexes user files (documents, code, images, small media) using Gemini Embedding 2. It will allow instantaneous semantic search over personal data using a local vector store.
 
 ## Proposed Changes
 

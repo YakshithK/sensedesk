@@ -7,6 +7,8 @@ pub mod store;
 pub mod search;
 pub mod commands;
 
+use tauri::Manager;
+
 fn main() {
     // Use the app's local data directory for storing vectors
     let data_dir = dirs::data_local_dir()
@@ -17,12 +19,22 @@ fn main() {
 
     tauri::Builder::default()
         .manage(app_state)
+        .setup(|app| {
+            let state = app.state::<commands::AppState>();
+            commands::bootstrap_watchers(state.inner());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::set_api_key,
             commands::get_api_key,
             commands::check_index_exists,
             commands::get_point_count,
             commands::start_indexing,
+            commands::get_indexed_roots,
+            commands::add_indexed_root,
+            commands::remove_indexed_root,
+            commands::reset_index,
+            commands::get_sync_status,
             commands::pause_indexing,
             commands::resume_indexing,
             commands::stop_indexing,

@@ -1,107 +1,85 @@
-# SenseDesk — Engineering Design
+# Vish — Engineering Design
 
-## Stack decision upfront
+> **Note:** This document reflects the *as-built* architecture as of v0.6.x. The original design proposed Qdrant + SQLite; the actual implementation replaced both with a simpler custom JSON vector store (no external DB process, no SQLite).
+
+## Stack
 
 **Framework: Tauri v2 (Rust + React/TypeScript)**
 - Smaller binary than Electron, real native OS integration, Rust backend handles file I/O and indexing without GIL or Node.js perf limits
-- Tauri's sidecar API lets you run a Python/Rust subprocess for the indexer if needed
 - React frontend keeps the UI layer familiar
 
-**Vector DB: Qdrant (embedded mode)**
-- Runs in-process via `qdrant` Rust crate — no separate server process
-- Supports payload filtering (file type, date, folder) natively on top of ANN search
-- Matryoshka-aware: store 3072-d, search with truncated 768-d vector
+**Vector DB: Custom In-Memory JSON Store** (`src-tauri/src/store/vector.rs`)
+- No external DB process — pure Rust `Vec<StoredPoint>` loaded into RAM from `~/.local/share/vish/vectors/vectors.json`
+- Vectors are L2-normalized at load and upsert time; search uses dot product (equivalent to cosine on normalized vectors)
+- Auto-flushes to disk every 200 points during indexing; background 5s flush loop via `tokio::spawn` in `main.rs`
+- Supports: `upsert`, `search` (dense), `lexical_search` (keyword), `delete_by_payload`, `delete_by_path_prefix`, `prune_missing_files`
 
-**Metadata: SQLite via `sqlx` (Rust)**
-- Separate from Qdrant; stores file records, chunk records, indexer state, API usage counters
-- WAL mode for crash resilience
+**No SQLite** — all metadata lives directly in the vector payload `HashMap<String, String>` with keys: `path`, `file_type`, `chunk_text`
 
 **Embedding: Gemini Embedding 2 via REST**
-- `gemini-embedding-exp-03-07` or `text-embedding-004` until Embedding 2 GA
-- Rust `reqwest` client with retry/backoff
+- Model: `gemini-embedding-2-preview`, 768-d output
+- Rust `reqwest` client with exponential backoff on 429s
 
 ---
 
 ## Repository layout
 
 ```
-sensedesk/
+vish/
 ├── src-tauri/                  # Rust backend
 │   ├── src/
-│   │   ├── main.rs             # Tauri app entry, command registration
+│   │   ├── main.rs             # Tauri app entry, command registration, 5s flush loop
+│   │   ├── commands.rs         # Tauri #[command] handlers, AppState, indexing logic
 │   │   ├── indexer/
 │   │   │   ├── mod.rs
 │   │   │   ├── crawler.rs      # FS walk, file type detection
 │   │   │   ├── extractor.rs    # Text/PDF/image content extraction
-│   │   │   ├── chunker.rs      # Token-aware chunking
-│   │   │   ├── watcher.rs      # notify crate file watcher
-│   │   │   └── scheduler.rs   # Batch queue + throttle
+│   │   │   ├── chunker.rs      # Token-aware chunking (tiktoken-rs, cl100k_base)
+│   │   │   ├── watcher.rs      # notify crate file watcher with debounce + generation counter
+│   │   │   ├── scheduler.rs    # (present but minimal; core scheduling is in commands.rs)
+│   │   │   └── media.rs        # Media file helpers
 │   │   ├── embedding/
 │   │   │   ├── mod.rs
-│   │   │   ├── client.rs       # Gemini API client, batching, retry
+│   │   │   ├── client.rs       # Gemini API client, batching, retry/backoff
 │   │   │   └── types.rs        # EmbedRequest/Response types
 │   │   ├── store/
 │   │   │   ├── mod.rs
-│   │   │   ├── vector.rs       # Qdrant wrapper
-│   │   │   ├── metadata.rs     # SQLite schema + queries
+│   │   │   ├── vector.rs       # Custom JSON vector store (no Qdrant)
+│   │   │   ├── metadata.rs     # (present, minimal)
 │   │   │   └── migrations/
-│   │   ├── search/
-│   │   │   └── mod.rs          # Query embed → ANN → merge with metadata
-│   │   └── commands.rs         # Tauri #[command] handlers exposed to frontend
+│   │   └── search/
+│   │       └── mod.rs
 ├── src/                        # React frontend
 │   ├── components/
 │   │   ├── SearchBar.tsx
 │   │   ├── ResultList.tsx
-│   │   ├── ResultCard.tsx
-│   │   ├── IndexProgress.tsx
+│   │   ├── SetupScreen.tsx
+│   │   ├── IndexingScreen.tsx
+│   │   ├── VishLogo.tsx
 │   │   └── Settings/
+│   │       └── SettingsPanel.tsx
 │   ├── hooks/
 │   │   ├── useSearch.ts
-│   │   └── useIndexerStatus.ts
+│   │   └── useAppState.ts
 │   └── App.tsx
 └── Cargo.toml
 ```
 
 ---
 
-## Data model (SQLite)
+## Data model (actual: vector payload)
 
-```sql
-CREATE TABLE files (
-  id          TEXT PRIMARY KEY,  -- UUID
-  path        TEXT UNIQUE NOT NULL,
-  file_type   TEXT NOT NULL,     -- 'pdf' | 'code' | 'image' | 'docx' | ...
-  size_bytes  INTEGER,
-  modified_at INTEGER,           -- Unix timestamp
-  indexed_at  INTEGER,
-  status      TEXT DEFAULT 'pending'  -- pending | indexed | failed | deleted
-);
+No SQLite. Each `StoredPoint` carries all metadata in its `payload: HashMap<String, String>`:
 
-CREATE TABLE chunks (
-  id            TEXT PRIMARY KEY,
-  file_id       TEXT REFERENCES files(id) ON DELETE CASCADE,
-  chunk_index   INTEGER,
-  modality      TEXT,            -- 'text' | 'image' | 'video'
-  text_excerpt  TEXT,            -- NULL for images
-  thumbnail_path TEXT,           -- NULL for text
-  qdrant_point_id TEXT UNIQUE,   -- UUID stored in Qdrant
-  created_at    INTEGER
-);
+| Key | Example | Notes |
+|---|---|---|
+| `path` | `/home/user/docs/notes.md` | Absolute path to the source file |
+| `file_type` | `md`, `jpg`, `pdf` | Lowercase extension |
+| `chunk_text` | `"The cosine similarity formula..."` | First 500 chars of chunk (text files); `[JPG file: cat.jpg]` for binary |
 
-CREATE TABLE indexer_state (
-  key   TEXT PRIMARY KEY,
-  value TEXT
-);
--- e.g. key='status' value='paused' | 'running' | 'idle'
--- key='tokens_used' value='3820500'
+Indexer state is tracked in-process via `Arc<AtomicU32>` (`files_done`, `files_total`) and `Arc<Mutex<String>>` (`status`).
 
-CREATE TABLE api_usage (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts         INTEGER,
-  tokens     INTEGER,
-  cost_usd   REAL
-);
-```
+Watched roots are persisted to `~/.local/share/vish/indexed-roots.json`.
 
 ---
 
@@ -214,32 +192,19 @@ Use a `tokio::sync::Semaphore` to cap concurrent batch calls (user-configurable,
 ### 5. Vector store (`vector.rs`)
 
 ```rust
-// Qdrant collection setup
-// Collection name: "sensedesk"
-// Vector config: size=3072 (store full), distance=Cosine
-// On search: pass named vector or truncate to 768
+// Custom in-memory JSON vector store
+// Path: ~/.local/share/vish/vectors/vectors.json
+// Vectors: 768-d f32, L2-normalized at load/upsert
+// Search: brute-force dot product, threshold 0.35, top-20
 
-// Each point payload:
-{
-  "chunk_id": "...",
-  "file_id": "...",
-  "file_type": "pdf",
-  "path": "/Users/.../notes.pdf",
-  "modified_at": 1710000000,
-  "modality": "text"
+pub struct StoredPoint {
+    pub id: u64,
+    pub vector: Vec<f32>,
+    pub payload: HashMap<String, String>,  // path, file_type, chunk_text
 }
 ```
 
-Search with payload filtering:
-```rust
-// Filter example: PDFs modified in last 90 days
-Filter {
-    must: vec![
-        Condition::field("file_type").matches("pdf"),
-        Condition::field("modified_at").range(since_90_days, now),
-    ]
-}
-```
+Key operations: `upsert`, `search` (dense), `lexical_search` (keyword/token scoring), `delete_by_payload`, `delete_by_path_prefix`, `prune_missing_files`.
 
 ### 6. File watcher (`watcher.rs`)
 
@@ -247,19 +212,17 @@ Filter {
 use notify::{RecommendedWatcher, RecursiveMode, Watcher, Event};
 
 // Watch all indexed root folders
-// On Create/Modify → push path to a bounded channel (cap 1000)
-// Scheduler drains channel, deduplicates paths, waits 5s after last event
-// (debounce) before triggering re-index of that file
+// Events debounced: accumulate into HashMap<PathBuf, WatchAction> for 350ms
+// On timeout flush: fire on_actions callback with deduplicated actions
+// Generation counter: watcher exits if counter has advanced (stale watcher cleanup)
 ```
 
-### 7. Indexer scheduler (`scheduler.rs`)
+### 7. Indexer state
 
-State machine:
-```
-Idle → Running → (Paused ↔ Running) → Idle
-```
-
-Persists `status`, `current_file_index`, `total_files` in `indexer_state` table so on crash/restart it resumes from roughly where it left off.
+No scheduler state machine persisted to disk. State is tracked in-process:
+- `files_done: Arc<AtomicU32>` / `files_total: Arc<AtomicU32>` — progress counters
+- `status: Arc<Mutex<String>>` — `"idle"` | `"indexing"` | `"done"` | `"error"`
+- `sync_status: Arc<Mutex<String>>` — `"idle"` | `"syncing"` (watcher activity)
 
 ---
 
@@ -270,11 +233,10 @@ User query (text)
     ↓
 Embed with task_type=RETRIEVAL_QUERY, dim=768
     ↓
-Qdrant ANN search, top_k=20, with optional payload filter
+Dense: brute-force dot product over all RAM vectors, threshold 0.35, top-20
+Lexical: token scan over payload fields (path, file_type, chunk_text)
     ↓
-Fetch chunk records from SQLite by qdrant_point_id
-    ↓
-Join with file records (path, type, modified_at)
+Merge: dense results first, lexical-only appended
     ↓
 Return ranked SearchResult[] to frontend
     ↓
@@ -320,22 +282,18 @@ Use Tauri events (`emit`) for real-time indexer progress from Rust → React.
 [dependencies]
 tauri = { version = "2", features = ["shell-open"] }
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "multipart"] }
+reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio", "migrate"] }
-qdrant-client = "1.9"
+# No qdrant-client, no sqlx — custom JSON store only
 walkdir = "2"
 notify = "6"
 tiktoken-rs = "0.5"
-uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
 anyhow = "1"
-tracing = "0.1"
-tracing-subscriber = "0.3"
 ```
 
-Frontend (`package.json`): React 18, TanStack Query (for search/status), Tailwind, Radix UI primitives, `@tauri-apps/api`.
+Frontend (`package.json`): React 19, Tailwind CSS, `lucide-react`, `@tauri-apps/api`.
 
 ---
 

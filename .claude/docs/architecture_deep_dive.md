@@ -1,4 +1,4 @@
-# SenseDesk / Vish Architecture Deep Dive
+# Vish Architecture Deep Dive
 
 This document outlines the complete mechanics of the Vish application, from the frontend React interface down to the raw JSON payloads hitting the Google Gemini embedding API, and how vector math performs the final search.
 
@@ -124,13 +124,14 @@ A background loop (`tokio::spawn` in [main.rs](file:///home/yakshith/sensedesk/s
 
 ---
 
-## 5. The Search Mechanics ([search](file:///home/yakshith/sensedesk/src-tauri/src/store/vector.rs#131-167) command)
+## 5. The Search Mechanics
 
-When you type "a recipe for chicken" into the frontend search bar, the UI calls the Tauri command [search(query)](file:///home/yakshith/sensedesk/src-tauri/src/store/vector.rs#131-167).
+When you type "a recipe for chicken" into the frontend search bar, the UI calls the Tauri `search` command.
 
-### Step 1: Query Embedding
-The backend fires your query to Gemini using [make_query_request](file:///home/yakshith/sensedesk/src-tauri/src/embedding/client.rs#47-62). 
-Crucially, the API payload looks like this:
+### Step 1: Hybrid Search (Dense + Lexical)
+The search pipeline runs **two passes in parallel**:
+
+**Dense pass (semantic):** The backend fires your query to Gemini using `make_query_request`.
 ```json
 {
   "content": { "parts": [{ "text": "a recipe for chicken" }] },
@@ -138,22 +139,88 @@ Crucially, the API payload looks like this:
   "outputDimensionality": 768
 }
 ```
-Setting `taskType: "RETRIEVAL_QUERY"` is vital. The neural network optimizes the 768 numbers slightly differently to match *against* the documents you saved earlier.
+Setting `taskType: "RETRIEVAL_QUERY"` is vital — the neural network optimizes the 768 numbers slightly differently to match *against* the documents you saved earlier.
 
-### Step 2: The Math (Cosine Similarity)
-The backend loops through **every single vector currently loaded in RAM**. Because the database is custom and simple, there are no HNSW graphs or indexes—it's a brute-force sweep.
+**Lexical pass (keyword):** Simultaneously, `lexical_search` runs a token-based scan over every point's `path`, `file_type`, and `chunk_text` payload fields. Scoring weights:
+- Exact filename match: +8.0
+- Exact path match: +5.0
+- Exact chunk_text match: +3.5
+- Token in filename: +3.0
+- Token matches file_type: +2.5
+- Token in path: +1.5
+- Token in chunk_text: +1.2
 
-For every document vector $A$ and the query vector $B$, it computes the **Cosine Similarity**:
-$$\text{Similarity} = \frac{\sum (A \cdot B)}{\sqrt{\sum A^2} \cdot \sqrt{\sum B^2}}$$
+Results from both passes are merged, with dense results ranked first, then lexical-only results appended. This handles exact-keyword queries (symbol names, filenames, error strings) that pure semantic search might rank poorly.
 
-In perfectly normalized models, this is just the dot product `A.iter().zip(B.iter()).map(|(a, b)| a * b).sum()`.
+### Step 2: The Math (Dot Product on Normalized Vectors)
+Vectors are **L2-normalized at load time** (and at upsert time), so cosine similarity reduces to a simple dot product:
+
+```
+score = A.iter().zip(B.iter()).map(|(a, b)| a * b).sum()
+```
+
+The backend loops through every vector in RAM (brute-force, no HNSW index).
 
 ### Step 3: Threshold Filtering
-It tosses out any result where the Cosine Similarity score is below **0.35**. (This prevents wildly unrelated files from showing up at the bottom of the list).
+Results below **0.35** cosine similarity are discarded.
 
 ### Step 4: Sorting and Frontend Normalization
-The backend sorts the remaining results highest-to-lowest and sends the top 20 matches back to the React UI as JSON.
+Backend returns the top 20 matches sorted highest-to-lowest.
 
-Once in React ([ResultList.tsx](file:///home/yakshith/sensedesk/src/components/ResultList.tsx)):
-1. **Deduplication:** Because a single text file might have been broken into 50 chunks, 10 chunks from the *same file* might appear in the top 20. The UI filters them so only the highest scoring chunk from a specific file is displayed.
-2. **Min-Max Score Normalization:** A cosine similarity of `0.60` is mathematically excellent for an embedding, but to a human user, "60% relevance" feels like a failure. The UI takes the highest score returned (e.g. `0.65`) and scales it to `~98%`, and scales the lowest returned score (e.g. `0.35`) down to `~40%`. This visually spreads the results out into a much more understandable "Relevance" metric for you to look at.
+Once in React (`ResultList.tsx`):
+1. **Deduplication:** Only the highest-scoring chunk per file path is shown.
+2. **Min-Max Score Normalization:** `0.65` cosine → displayed as `~98%`, `0.35` → `~40%`. This makes the relevance metric human-readable.
+3. **Thumbnail injection:** For image results (`png`, `jpg`, `webp`), the backend inlines a base64 data-URI thumbnail directly in the payload so the UI can render a preview without additional file reads.
+
+---
+
+## 6. The File Watcher (`indexer/watcher.rs`)
+
+After initial indexing completes, a background file system watcher is spawned to keep the index current.
+
+### How It Works
+- Uses the `notify` crate (`RecommendedWatcher`) watching all indexed root folders recursively.
+- Events are classified into `WatchAction::Upsert(PathBuf)` or `WatchAction::Delete(PathBuf)`:
+  - Create / Modify events → `Upsert`
+  - Remove events → `Delete`
+  - Rename (both-sides) → `Delete` old path + `Upsert` new path
+- Events are **debounced**: accumulated into a `pending` map for 350ms of inactivity before firing. This collapses rapid successive writes (e.g. editor autosave) into a single action per path.
+
+### Generation Counter
+To avoid zombie watchers accumulating across re-indexing runs, a `watcher_generation: Arc<AtomicU32>` is incremented each time a new watcher is spawned. The watcher thread checks this counter every tick and exits cleanly if its generation is stale.
+
+### Sync Status
+`sync_status: Arc<Mutex<String>>` tracks the watcher state visible to the frontend: `"idle"` or `"syncing"`. It's set to `"syncing"` during active upsert/delete operations.
+
+### On Upsert
+`index_single_file` is called, which:
+1. Deletes all existing vectors for that path (`delete_by_payload("path", ...)`)
+2. Re-indexes the file fresh
+
+### On Delete
+`delete_by_payload` or `delete_by_path_prefix` removes all vectors whose `path` matches (exact) or starts with the deleted path (for directory removals).
+
+---
+
+## 7. Vector Store Extra Capabilities
+
+Beyond basic `upsert` and `search`, the vector store exposes:
+
+| Method | Purpose |
+|---|---|
+| `delete_by_payload(key, value)` | Remove all points where `payload[key] == value` (used for per-file re-index) |
+| `delete_by_path_prefix(prefix)` | Remove all points under a directory (handles folder deletes/moves) |
+| `prune_missing_files()` | Scan all points and remove those whose `path` no longer exists on disk |
+| `max_point_id()` | Returns max existing ID to derive a safe next ID after deletions |
+| `has_points()` | Fast empty check to skip search when index is blank |
+| `point_count()` | Total number of stored vectors |
+
+---
+
+## 8. Watched Roots Persistence
+
+The list of indexed folders is persisted to `~/.local/share/vish/indexed-roots.json` as:
+```json
+{ "roots": ["/home/user/Documents", "/home/user/Projects"] }
+```
+On app startup, this file is loaded so watched roots are restored without requiring the user to re-select folders. The watcher is re-spawned automatically for these roots.

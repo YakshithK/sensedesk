@@ -46,7 +46,7 @@ function App() {
         />
       )}
 
-      {searchView && !showSettings && !hasResults && !isSearching && (
+      {searchView && !hasResults && !isSearching && (
         <section className="relative z-10 flex min-h-[78vh] w-full flex-col">
           <div className="flex items-start justify-between px-2 pt-1 md:px-4">
             <div className="inter-ui text-[2rem] font-light uppercase tracking-tight text-[var(--text-main)] md:text-[2.75rem] lg:text-[3.5rem]">
@@ -73,7 +73,7 @@ function App() {
         </section>
       )}
 
-      {searchView && !showSettings && (hasResults || isSearching) && (
+      {searchView && (hasResults || isSearching) && (
         <section className="window-shell animate-fade-in">
           <div className="window-panel flex flex-col gap-4 p-4 md:p-6">
             <div className="flex items-center justify-between px-1 pb-2 pt-1">
@@ -109,17 +109,13 @@ function App() {
       )}
 
       {searchView && showSettings && (
-        <section className="window-shell animate-fade-in">
-          <div className="window-panel min-h-[680px]">
-            <SettingsPanel
-              onClose={() => setShowSettings(false)}
-              onReindex={() => {
-                setShowSettings(false);
-                setScreen("setup");
-              }}
-            />
-          </div>
-        </section>
+        <SettingsPanel
+          onClose={() => setShowSettings(false)}
+          onReindex={() => {
+            setShowSettings(false);
+            setScreen("setup");
+          }}
+        />
       )}
     </main>
   );

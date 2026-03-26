@@ -344,7 +344,109 @@
   padding: 0 0.08rem;
 }
 
+.settings-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background:
+    linear-gradient(180deg, rgba(7, 12, 9, 0.16), rgba(7, 12, 9, 0.32)),
+    rgba(6, 11, 8, 0.24);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.settings-modal {
+  width: min(640px, calc(100vw - 2.5rem));
+  border-radius: 1.8rem;
+  padding: 1.5rem;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  box-shadow:
+    0 24px 60px rgba(0, 0, 0, 0.26),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+
+.settings-modal-icon {
+  display: flex;
+  height: 3.4rem;
+  width: 3.4rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 1.2rem;
+  color: rgba(255, 210, 170, 0.95);
+  background:
+    radial-gradient(circle at center, rgba(255, 188, 128, 0.18), transparent 62%),
+    rgba(255, 150, 120, 0.08);
+  box-shadow: 0 0 22px rgba(255, 155, 120, 0.14);
+}
+
+.settings-modal-note {
+  background:
+    linear-gradient(180deg, rgba(248, 250, 248, 0.12), rgba(210, 220, 212, 0.08)),
+    rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.settings-roots-list {
+  display: flex;
+  max-height: min(240px, 28vh);
+  flex-direction: column;
+  gap: 0.75rem;
+  overflow-y: auto;
+  padding-right: 0.25rem;
+}
+
+.settings-dropzone {
+  border: 1px solid rgba(185, 255, 227, 0.18);
+}
+
+.settings-dropzone-active {
+  border-color: rgba(176, 255, 223, 0.72);
+  box-shadow:
+    0 0 0 1px rgba(176, 255, 223, 0.22),
+    0 0 32px rgba(155, 255, 215, 0.22);
+  transform: translateY(-1px);
+}
+
+.settings-dropzone-icon {
+  margin: 0 auto;
+  display: flex;
+  height: 2.8rem;
+  width: 2.8rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: rgba(174, 255, 224, 0.96);
+  background:
+    radial-gradient(circle at center, rgba(182, 255, 228, 0.22), transparent 65%),
+    rgba(255, 255, 255, 0.04);
+}
+
 @media (max-width: 767px) {
+  .settings-overlay {
+    padding: 1rem;
+  }
+
+  .settings-modal {
+    width: min(560px, calc(100vw - 1.5rem));
+    padding: 1.15rem;
+    border-radius: 1.4rem;
+  }
+
+  .settings-roots-list {
+    max-height: 180px;
+  }
+
+  .settings-modal-icon {
+    height: 3rem;
+    width: 3rem;
+    border-radius: 1rem;
+  }
+
   .setup-shell {
     --setup-scale: 0.88;
     width: min(720px, calc(100vw - 28px));

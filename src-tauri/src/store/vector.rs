@@ -81,6 +81,27 @@ impl VectorStore {
         Ok(removed)
     }
 
+    pub async fn delete_by_path_prefix(&self, prefix: &str) -> Result<usize> {
+        let mut idx = self.index.lock().await;
+        let before = idx.points.len();
+        idx.points.retain(|point| {
+            point
+                .payload
+                .get("path")
+                .map(|path| {
+                    path != prefix
+                        && !path.starts_with(&format!("{}/", prefix))
+                        && !path.starts_with(&format!("{}\\", prefix))
+                })
+                .unwrap_or(true)
+        });
+        let removed = before - idx.points.len();
+        if removed > 0 {
+            *self.dirty.lock().await = true;
+        }
+        Ok(removed)
+    }
+
     /// Prune vectors for files that no longer exist on the physical disk
     pub async fn prune_missing_files(&self) -> Result<usize> {
         let mut idx = self.index.lock().await;
